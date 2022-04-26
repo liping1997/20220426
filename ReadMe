@@ -1,0 +1,61 @@
+## Prerequisites
+- Linux or macOS
+- Python 3
+- CPU or NVIDIA GPU + CUDA CuDNN
+
+## Setting enviroments(Installation)
+
+-创建环境： conda create --name FA_generation python=3.6
+-激活环境： conda activate FA_generation
+-依赖库安装： pip install -r requirements.txt
+
+
+### 1. Train/Test (Resnet + L1 loss)
+
+- Train the model :
+```
+python train.py --dataroot ./datasets/FFA --name FFA_res_l1 --model pix2pix --netG resnet_9blocks
+
+```
+
+- Test the model:
+```
+python test.py --dataroot ./datasets/FFA --name FFA_res_l1 --model pix2pix --netG resnet_9blocks
+
+```
+
+### 2. Train/Test (Resnet + L1 loss + perceptual loss)
+
+- Train the model :
+```
+python train.py --dataroot ./datasets/FFA --name FFA_res_l1_lp --model pix2pixlp --netG resnet_9blocks
+
+```
+
+- Test the model:
+```
+python test.py --dataroot ./datasets/FFA --name FFA_res_l1_lp --model pix2pixlp --netG resnet_9blocks
+
+```
+
+### 3. Train/Test (Resnet + L1 loss + perceptual loss + local saliency loss)(Final Model!!!)
+
+- Train the model :
+```
+python train.py --dataroot ./datasets --name FFA_res_lp_lsal --model pix2pixlsal --netG resattgen --netD SD --preprocess none
+
+```
+
+- Test the model:
+```
+python test.py --dataroot ./datasets/FFA --name FFA_res_lp_lsal --model pix2pixlsal --netG resnet_9blocks
+
+```
+
+
+
+
+
+
+
+
