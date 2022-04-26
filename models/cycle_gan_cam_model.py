@@ -3,9 +3,36 @@ import itertools
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
+from cam_generation.heatmap import mask_generate
+import numpy as np
+from util.util import tensor2im
+from torchvision import transforms
+import cv2
 
+def mask_img_generate(tensor, mask):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    img = tensor2im(tensor)
+    transform1 = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5),
+                                                          (0.5, 0.5, 0.5))])
 
-class CycleGANModel(BaseModel):
+    # image reversal operation and expand the one-channel image into three-channels
+    binary_ver = 255 - mask 
+    binary_ver = np.expand_dims(binary_ver, axis=2)
+    binary_ver = np.concatenate((binary_ver, binary_ver, binary_ver), axis=-1) 
+
+    # image 'bitwise_and' operation
+    mask_img = cv2.bitwise_and(img, binary_ver)    #[768.768]
+
+    # change CV image to Tensor and Normalize it
+    mask_img_tensor = transform1(mask_img)
+
+    # dim expansion of 3-channels([3, 256, 256]) to 4-channels ([1, 3, 256, 256])
+    mask_img_tensor = mask_img_tensor.unsqueeze(0)
+
+    mask_img_cuda_tensor = mask_img_tensor.to(device)
+    return mask_img_cuda_tensor
+
+class CycleGANCamModel(BaseModel):
     """
     This class implements the CycleGAN model, for learning image-to-image translation without paired data.
 
@@ -41,8 +68,9 @@ class CycleGANModel(BaseModel):
             parser.add_argument('--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_B', type=float, default=10.0, help='weight for cycle loss (B -> A -> B)')
             parser.add_argument('--lambda_identity', type=float, default=0.5, help='use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, please set lambda_identity = 0.1')
-
-        return parser
+            parser.add_argument('--lambda_mask', type=float, default = 10.0, help = 'weight for mask loss')
+            #parser.add_argument('--lambda_maskB', type=float, default = 10.0, help = 'weight for mask loss')
+            return parser
 
     def __init__(self, opt):
         """Initialize the CycleGAN class.
@@ -52,9 +80,9 @@ class CycleGANModel(BaseModel):
         """
         BaseModel.__init__(self, opt)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
-        self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B']
+        self.loss_names = ['D_A', 'G_A', 'cycle_A','idt_A','D_B', 'G_B', 'cycle_B', 'idt_B', 'mask']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        visual_names_A = ['real_A', 'fake_B', 'rec_A']
+        visual_names_A = ['real_A', 'fake_B', 'rec_A', 'mask_real_A', 'mask_fake_B']
         visual_names_B = ['real_B', 'fake_A', 'rec_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
@@ -90,6 +118,7 @@ class CycleGANModel(BaseModel):
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionCycle = torch.nn.L1Loss()
             self.criterionIdt = torch.nn.L1Loss()
+            self.mask_loss = torch.nn.MSELoss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG_A.parameters(), self.netG_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -112,10 +141,15 @@ class CycleGANModel(BaseModel):
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
         self.fake_B = self.netG_A(self.real_A)  # G_A(A)
+        #print(self.fake_B.shape)
         self.rec_A = self.netG_B(self.fake_B)   # G_B(G_A(A))
         self.fake_A = self.netG_B(self.real_B)  # G_B(B)
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
+        self.mask = mask_generate(self.real_A)
+        self.mask_real_A = mask_img_generate(self.real_A, self.mask)
+        self.mask_fake_B = mask_img_generate(self.fake_B, self.mask)
 
+        #print(self.fake_B_mask.shape)
     def backward_D_basic(self, netD, real, fake):
         """Calculate GAN loss for the discriminator
 
@@ -153,6 +187,7 @@ class CycleGANModel(BaseModel):
         lambda_idt = self.opt.lambda_identity
         lambda_A = self.opt.lambda_A
         lambda_B = self.opt.lambda_B
+        lambda_mask = self.opt.lambda_mask
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed: ||G_A(B) - B||
@@ -171,10 +206,21 @@ class CycleGANModel(BaseModel):
         self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A), True)
         # Forward cycle loss || G_B(G_A(A)) - A||
         self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_A
+        # Forward cycle loss = Forward cycle loss + loss_mask
         # Backward cycle loss || G_A(G_B(B)) - B||
         self.loss_cycle_B = self.criterionCycle(self.rec_B, self.real_B) * lambda_B
+        # Forward mask loss
+        self.loss_mask = self.mask_loss(self.mask_real_A, self.mask_fake_B) * lambda_mask
+        # Backward saliency loss
+        #self.loss_mask_B = self.mask_loss(self.mask_real_B, self.mask_rec_B) * self.opt.lambda_maskB
+        # Forward weighted loss
+        #self.loss_local_l1_A = self.local_l1_loss(self.weighted_rec_A, self.weighted_real_A) * self.opt.lambda_wA
+        # Backward weighted loss
+        #self.loss_local_l1_B = self.local_l1_loss(self.weighted_rec_B, self.weighted_real_B) * self.opt.lambda_wB
+        
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_mask
+        
         self.loss_G.backward()
 
     def optimize_parameters(self):
